@@ -1,0 +1,17 @@
+{
+    "buyer_onboarding": [
+        "pre_qualification"
+    ],
+    "pre_qualification": [
+        "conditional_approval"
+    ],
+    "conditional_approval": [
+        "formal_approval"
+    ],
+    "formal_approval": [
+        "settlement_ready"
+    ],
+    "settlement_ready": [
+        "settled"
+    ]
+}

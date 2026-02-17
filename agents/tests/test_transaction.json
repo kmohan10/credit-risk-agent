@@ -1,0 +1,22 @@
+{
+    "transaction_id": "TXN001",
+    "status": "buyer_onboarding",
+    "parties": {
+        "buyer": {}
+    },
+    "compliance": {
+        "financial_inquiry": {},
+        "requirements_objectives": {},
+        "foreseeable_changes": {}
+    },
+    "workflow_flags": {
+        "expense_primer_shown": false,
+        "pending_confirmation": {
+            "field": null,
+            "value": null
+        }
+    },
+    "workflow_runtime": {
+        "last_question_field": null
+    }
+}

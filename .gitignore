@@ -1,0 +1,7 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+.env
+.venv/
+__pycache__/
+*.pyc
+*.log
+agents/tests/test_transaction_updated.json

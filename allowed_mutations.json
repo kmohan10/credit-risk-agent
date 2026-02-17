@@ -1,0 +1,23 @@
+{
+    "buyer_intake_agent": [
+        "parties.buyer",
+        "compliance.requirements_objectives",
+        "compliance.financial_inquiry",
+        "compliance.foreseeable_changes",
+        "workflow_flags"
+    ],
+    "document_agent": [
+        "documents",
+        "compliance.verification"
+    ],
+    "risk_agent": [
+        "risk",
+        "compliance.assessment_history"
+    ],
+    "workflow_agent": [
+        "status",
+        "conditions",
+        "events",
+        "contract"
+    ]
+}

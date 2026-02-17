@@ -1,0 +1,143 @@
+{
+    "transaction_id": "",
+    "status": "buyer_onboarding",
+    "parties": {
+        "buyer": {
+            "name": "",
+            "dob": "",
+            "employment": "",
+            "income_annual": 0,
+            "dependents": 0
+        },
+        "seller": {},
+        "agent": {},
+        "bank": {}
+    },
+    "loan": {
+        "requested_amount": 0,
+        "deposit": 0,
+        "ltv": 0,
+        "product_type": "",
+        "term_years": 30,
+        "interest_rate": null,
+        "approval_stage": "pre_qualification",
+        "repayment_type": "principal_interest/interest_only",
+        "offset_account": false,
+        "rate_type": "fixed/variable"
+    },
+    "property": {
+        "address": "",
+        "purchase_price": 0,
+        "property_type": "",
+        "postcode_risk": null,
+        "valuation": null
+    },
+    "contract": {
+        "status": "not_signed/conditional/unconditional/settled",
+        "finance_clause_date": "",
+        "settlement_date": "",
+        "cooling_off_end": ""
+    },
+    "documents": [
+        {
+            "document_id": "",
+            "type": "",
+            "owner_party": "buyer/seller/agent/bank",
+            "status": "uploaded/verified/rejected",
+            "extracted_fields": {},
+            "upload_timestamp": ""
+        }
+    ],
+    "conditions": [],
+    "risk": {
+        "serviceability_passed": null,
+        "ifrs9_stage": null,
+        "credit_grade": null
+    },
+    "workflow_flags": {
+        "expense_primer_shown": false,
+        "pending_confirmation": {
+            "field": null,
+            "value": null
+        }
+    }
+
+    "compliance": {
+        "requirements_objectives": {
+            "purpose": "",
+            "occupancy": "",
+            "desired_features": [],
+            "time_horizon_years": null,
+            "risk_tolerance": "",
+            "customer_acknowledgment": false
+        },
+        "financial_inquiry": {
+            "living_expenses": {
+                "housing": 0,
+                "food": 0,
+                "transport": 0,
+                "utilities": 0,
+                "insurance": 0,
+                "childcare": 0,
+                "medical": 0,
+                "subscriptions": 0,
+                "discretionary": 0
+            },
+            "liabilities": [
+                {
+                    "type": "",
+                    "limit": 0,
+                    "repayment": 0,
+                    "remaining_term_months": 0
+                }
+            ],
+            "income_sources": [
+                {
+                    "type": "",
+                    "amount": 0,
+                    "frequency": "",
+                    "employment_status": "",
+                    "stability": "stable/variable",
+                    "verified": false,
+                    "verification_method": ""
+                }
+            ]
+        },
+        "verification": {
+            "evidence_links": [
+                {
+                    "document_id": "",
+                    "verifies_field": "",
+                    "confidence": "high/medium/low"
+                }
+            ],
+            "expense_method": "declared/bank_statement/benchmark",
+            "income_method": "payslip/tax_return/accountant_letter"
+        },
+        "foreseeable_changes": {
+            "expected_income_change": "",
+            "expected_expense_change": "",
+            "life_events": [],
+            "borrower_confirmed_no_changes": false
+        },
+        "assessment_history": [
+            {
+                "stage": "pre_approval",
+                "serviceability_buffer_used": 0,
+                "hem_comparison_result": "",
+                "unsuitable_if_approved": false,
+                "assessor_notes": "",
+                "assessment_timestamp": ""
+            }
+        ]
+    },
+    "events": [
+        {
+            "event_type": "",
+            "actor": "buyer/agent/bank/system",
+            "related_object": "",
+            "timestamp": "",
+            "details": {}
+        }
+    ]
+}
