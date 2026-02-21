@@ -1,411 +1,790 @@
-import os
 import json
-import logging
-import shutil
+import os
 import re
-import google.generativeai as genai
-import google.api_core.exceptions
-from dotenv import load_dotenv
+import uuid
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+from difflib import get_close_matches
 from apply_patch import apply_patches
 
-# ---------------- CONFIG ----------------
+# --------------------------------------------------
+# LOAD AGENT INSTRUCTIONS
+# --------------------------------------------------
+DEV_ALWAYS_NEW = True
+
+from dotenv import load_dotenv
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-logger = logging.getLogger(__name__)
 
-API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("ANTIGRAVITY_API_KEY")
-if not API_KEY:
-    logger.error("API Key not found. Please set GOOGLE_API_KEY or GEMINI_API_KEY.")
-    exit(1)
+from google import genai
 
-genai.configure(api_key=API_KEY)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-SCHEMA_PATH = "transaction_schema.json"
-AGENT_MD_PATH = "agents/buyer_intake_agent.md"
-INITIAL_STATE_PATH = "agents/tests/test_transaction.json"
-UPDATED_STATE_PATH = "agents/tests/test_transaction_updated.json"
+def project_path(*parts):
+    return os.path.join(BASE_DIR, *parts)
 
+AGENT_SPEC_PATH = project_path("agents", "buyer_intake_agent.md")
 
-# ---------------- FILE HELPERS ----------------
-def load_text(path):
-    with open(path, 'r', encoding='utf-8') as f:
+def load_agent_instructions():
+    with open(AGENT_SPEC_PATH, "r", encoding="utf-8") as f:
         return f.read()
 
-def load_json(path):
-    with open(path, 'r', encoding='utf-8') as f:
+AGENT_INSTRUCTIONS = load_agent_instructions()
+API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+if not API_KEY:
+    raise ValueError("No API key found in .env")
+
+client = genai.Client(api_key=API_KEY)
+
+
+# --------------------------------------------------
+# CONFIG
+# --------------------------------------------------
+
+STATE_PATH = project_path("agents", "tests", "test_transaction_updated.json")
+WORKFLOW_PATH = project_path("schemas", "intake_workflow.json")
+SCHEMA_PATH = project_path("schemas", "transaction_schema.json")
+APPLICATIONS_DIR = project_path("applications")
+ACTIVE_APP_FILE = project_path("current_application.txt")
+
+# --------------------------------------------------
+# LOADERS
+# --------------------------------------------------
+
+
+def new_application_id():
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    short = uuid.uuid4().hex[:4].upper()
+    return f"{ts}-{short}"
+
+def get_active_application_id():
+    if not os.path.exists(ACTIVE_APP_FILE):
+        return None
+    with open(ACTIVE_APP_FILE, "r") as f:
+        return f.read().strip()
+
+
+def set_active_application_id(app_id):
+    with open(ACTIVE_APP_FILE, "w") as f:
+        f.write(app_id)
+
+
+def application_file(app_id):
+    return os.path.join(APPLICATIONS_DIR, f"{app_id}.json")
+
+def load_json(path: str) -> dict:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Missing file: {path}")
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def save_json(path, data):
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4)
+
+def load_state() -> dict:
+
+    if DEV_ALWAYS_NEW:
+        os.makedirs(APPLICATIONS_DIR, exist_ok=True)
+
+        app_id = new_application_id()
+        set_active_application_id(app_id)
+
+        state = load_json(SCHEMA_PATH)
+        state["application_id"] = app_id
+        state["workflow_runtime"] = {"active_index": 0}
+        save_state(state)
+        return state
+
+    
+    # ensure applications folder exists
+    os.makedirs(APPLICATIONS_DIR, exist_ok=True)
+
+    workflow = load_json(WORKFLOW_PATH)
+    total_fields = sum(len(stage["fields"]) for stage in workflow["stages"])
+
+    app_id = get_active_application_id()
+
+    # ---------- NO ACTIVE APPLICATION ----------
+    if not app_id:
+        print("Creating new loan application...")
+        app_id = new_application_id()
+        set_active_application_id(app_id)
+
+        state = load_json(SCHEMA_PATH)
+        state["application_id"] = app_id
+        state["workflow_runtime"] = {"active_index": 0}
+
+        save_state(state)
+        return state
+
+    # ---------- LOAD EXISTING ----------
+    path = application_file(app_id)
+
+    if not os.path.exists(path):
+        print("Application pointer invalid — starting new...")
+        return load_state()
+
+    state = load_json(path)
+
+    # ---------- CHECK COMPLETED ----------
+    active = state.get("workflow_runtime", {}).get("active_index", 0)
+
+    if active >= total_fields:
+        print("Previous application completed — starting a new one...\n")
+
+        app_id = new_application_id()
+        set_active_application_id(app_id)
+
+        state = load_json(SCHEMA_PATH)
+        state["application_id"] = app_id
+        state["workflow_runtime"] = {"active_index": 0}
+
+        save_state(state)
+        return state
+
+    return state
 
 
-# ---------------- RESET STATE ----------------
-def reset_state():
-    if not os.path.exists(INITIAL_STATE_PATH):
-        raise FileNotFoundError(f"Missing base state: {INITIAL_STATE_PATH}")
-    if os.path.exists(UPDATED_STATE_PATH):
-        os.remove(UPDATED_STATE_PATH)
-    shutil.copy(INITIAL_STATE_PATH, UPDATED_STATE_PATH)
+def save_state(state: dict):
+    app_id = state["application_id"]
+    path = application_file(app_id)
 
-FIELD_QUESTION_MAP = {
-    "parties.buyer.name": "What is your full legal name as it appears on your identification?",
-    "parties.buyer.dob": "What is your date of birth? (DD/MM/YYYY)",
-    "parties.buyer.dependents": "How many dependents do you financially support?",
-    "income": "What is your employment income before tax?",
-    "expense_primer": "Think about a normal month. I will ask about a few common spending areas.",
-    "expense:housing": "What is your monthly housing expense including rent or mortgage?",
-    "expense:food": "What is your monthly food expense?",
-    "expense:transport": "What is your monthly transport expense?",
-    "expense:utilities": "What is your monthly utilities expense?",
-    "expense:insurance": "What is your monthly insurance expense?",
-    "expense:childcare": "What is your monthly childcare expense?",
-    "expense:medical": "What is your monthly medical expense?",
-    "expense:subscriptions": "What is your monthly subscriptions expense?",
-    "expense:discretionary": "What is your monthly discretionary spending?"
-}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
 
-# ---------------- ORCHESTRATOR ----------------
-def resolve_next_field(state):
-    buyer = state.get("parties", {}).get("buyer", {})
-    fi = state.get("compliance", {}).get("financial_inquiry", {})
-    expenses = fi.get("living_expenses", {})
-    flags = state.get("workflow_flags", {})
+
+# --------------------------------------------------
+# WORKFLOW INTERPRETER
+# --------------------------------------------------
+
+def flatten_fields(workflow: dict) -> List[Dict[str, Any]]:
+    fields = []
+    for stage in workflow.get("stages", []):
+        for f in stage.get("fields", []):
+            fields.append(f)
+    return fields
+
+def find_section_start(meta_fields, array_path):
+    for i, f in enumerate(meta_fields):
+        if f["path"].startswith(array_path + "[0]"):
+            return i
+    return None
+
+# DECTECT END OF REPEATING SECTION
+def is_last_field_of_section(meta_fields, idx, section_fields):
+    if idx + 1 >= len(meta_fields):
+        return True
+    return meta_fields[idx + 1]["path"] not in section_fields
+
+# --------------------------------------------------
+# POINTER HELPERS
+# --------------------------------------------------
+
+def get_active_index(state: dict) -> int:
+    return state.setdefault("workflow_runtime", {}).setdefault("active_index", 0)
+
+
+def set_active_index(state: dict, idx: int):
+    state.setdefault("workflow_runtime", {})["active_index"] = idx
+
+
+def current_field(meta_fields: List[dict], state: dict) -> Optional[dict]:
+    idx = get_active_index(state)
+    if idx >= len(meta_fields):
+        return None
+    return meta_fields[idx]
+
+
+def advance_field(state: dict):
+    set_active_index(state, get_active_index(state) + 1)
+
+def render_question(state, field_meta):
+    question = field_meta.get("question", field_meta.get("path"))
+
     runtime = state.get("workflow_runtime", {})
-    asked = runtime.get("asked_fields", [])
+    indices = runtime.get("array_index", {})
 
-    # ---------------- CONVERSATIONAL IDENTITY RESOLUTION ----------------
-    identity_order = ["parties.buyer.name", "parties.buyer.dob"]
+    path = resolve_dynamic_path(state, field_meta["path"])
 
-    # First: ask missing identity fields once
-    for field in identity_order:
-        key = field.split('.')[-1]
-        if not buyer.get(key) and field not in asked:
-            return field
+    for array_path, idx in indices.items():
+        if path.startswith(array_path + "[") and idx > 0:
+            # specific rewrite for income
+            if "annual income" in question.lower():
+                return question.replace(
+                    "your annual income",
+                    "your additional annual income"
+                )
 
-    # Second: if identity still incomplete but already asked → do NOT block flow
-    # (this prevents repetition freeze)
-    # --------------------------------------------------------------------
+            return "For this additional entry — " + question
 
-    if "dependents" not in buyer:
-        return "parties.buyer.dependents"
+    return question
 
-    if not fi.get("income_sources"):
-        return "income"
+# --------------------------------------------------
+# PATH UTILITIES (supports a.b.c and list[0])
+# --------------------------------------------------
 
-    if not flags.get("expense_primer_shown"):
-        return "expense_primer"
+def _parse_path(path: str):
+    parts = []
+    for token in path.split('.'):
+        if '[' in token and token.endswith(']'):
+            name, idx = token[:-1].split('[')
+            parts.append(name)
+            parts.append(int(idx))
+        else:
+            parts.append(token)
+    return parts
 
-    order = [
-        "housing","food","transport","utilities",
-        "insurance","childcare","medical","subscriptions","discretionary"
-    ]
 
-    for k in order:
-        if k not in expenses:
-            return f"expense:{k}"
-
-    return "done"
-
-# ---------------- AGENT TURN ----------------
-
-def run_agent_turn(model, state, user_input, agent_instructions, target_field):
-
-    system_control = f"""
-You are a banking data extraction engine.
-
-Your job:
-Extract structured values for the specified field.
-
-FIELD TO EXTRACT:
-{target_field}
-
-Rules:
-- Return ONLY a JSON array
-- Do NOT speak
-- Do NOT ask questions
-- Do NOT explain
-- If no value found → return operation "none"
-"""
-
-    prompt = f"""
-{system_control}
-
-{agent_instructions}
-
-CURRENT STATE:
-{json.dumps(state, indent=2)}
-
-USER INPUT:
-{user_input}
-
-Return JSON patches only.
-"""
-
+def get_by_path(state: dict, path: str):
+    ref = state
     try:
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-
-        # Extract the FIRST valid JSON array (robust)
-        start = text.find('[')
-        end = text.rfind(']')
-        if start == -1 or end == -1:
-            logger.error("No JSON array detected")
-            return []
-
-        json_text = text[start:end+1]
-
-        try:
-            return json.loads(json_text)
-        except Exception as e:
-            logger.error(f"JSON parse failure: {e}")
-            logger.error(f"Extracted text: {json_text}")
-            return []
-
-    except google.api_core.exceptions.ResourceExhausted:
-        logger.error("Quota exceeded (429). Wait and retry.")
-        return []
-
-    except Exception as e:
-        logger.error(f"Agent turn error: {e}")
-        return []
+        for p in _parse_path(path):
+            ref = ref[p]
+        return ref
+    except Exception:
+        return None
 
 
-#  Parser Function 
+def set_by_path(state: dict, path: str, value):
+    ref = state
+    parts = _parse_path(path)
 
-def deterministic_pre_extract(state, user_input):
+    for i, p in enumerate(parts[:-1]):
+        nxt = parts[i+1]
 
-    text = user_input.lower()
-    buyer = state.setdefault("parties", {}).setdefault("buyer", {})
-    fi = state.setdefault("compliance", {}).setdefault("financial_inquiry", {})
+        if isinstance(p, int):
+            # ensure list
+            while len(ref) <= p:
+                ref.append({})
+            ref = ref[p]
 
-    # ---------------- DEPENDENTS ----------------
-    if "dependents" not in buyer:
-        if re.search(r'\b(no|zero|none|nil)\s+dependents\b', text) or \
-           re.search(r"do not have.*dependents|don't have.*dependents", text):
-            buyer["dependents"] = 0
-            logger.info("Deterministic extraction: dependents = 0")
+        else:
+            # decide dict vs list based on next token
+            if isinstance(nxt, int):
+                ref = ref.setdefault(p, [])
+            else:
+                ref = ref.setdefault(p, {})
 
-        m = re.search(r'(\d+)\s+dependents?', text)
-        if m:
-            buyer["dependents"] = int(m.group(1))
-            logger.info(f"Deterministic extraction: dependents = {buyer['dependents']}")
+    last = parts[-1]
 
-    # ---------------- INCOME ----------------
-    if not fi.get("income_sources"):
-        m = re.search(r'(earn|make|salary|income)[^\d]{0,10}(\d{2,7})', text)
-        if m:
-            income = int(m.group(2))
-            fi["income_sources"] = [{
-                "type": "employment",
-                "amount": income,
-                "frequency": "annual",
-                "employment_status": "unknown",
-                "stability": "unknown",
-                "verified": False,
-                "verification_method": ""
-            }]
-            logger.info(f"Deterministic extraction: income = {income}")
+    if isinstance(last, int):
+        while len(ref) <= last:
+            ref.append(None)
+        ref[last] = value
+    else:
+        ref[last] = value
 
-    # ---------------- DOB ----------------
-    if not buyer.get("dob"):
-        m = re.search(r'\b(\d{1,2}/\d{1,2}/\d{2,4})\b', user_input)
-        if m:
-            dob = m.group(1)
-            buyer["dob"] = dob
-            logger.info(f"Deterministic extraction: dob = {dob}")
+def resolve_dynamic_path(state, path):
+    runtime = state.get("workflow_runtime", {})
+    indices = runtime.get("array_index", {})
 
-    # ---------------- NAME ----------------
-    if not buyer.get("name"):
-        # avoid capturing financial phrases as names
-        name_match = re.search(r'\b([A-Z][a-z]{2,} [A-Z][a-z]{2,})\b', user_input)
-        if name_match and not re.search(r'(loan|income|salary|credit|account)', user_input, re.I):
-            buyer["name"] = name_match.group(1)
-            logger.info(f"Deterministic extraction: name = {buyer['name']}")
+    for arr_path, idx in indices.items():
+        path = path.replace(f"{arr_path}[0]", f"{arr_path}[{idx}]")
+
+    return path
 
 
-# Field Capture Layer
+def get_array_parent(path: str):
+    if "[" in path:
+        return path.split("[")[0]
+    return None
 
-def deterministic_field_capture(state, user_input):
+def workflow_stage_repeat_prompt(workflow: dict, array_path: str) -> str:
+    for stage in workflow.get("stages", []):
+        repeat = stage.get("section_repeat")
+        if repeat and repeat.get("array_path") == array_path:
+            return repeat.get("repeat_prompt")
+    return "Do you have another Item?"
 
-    runtime = state.setdefault("workflow_runtime", {})
-    last_field = runtime.get("last_question_field")
+# --------------------------------------------------
+# VALIDATION (presence only)
+# --------------------------------------------------
 
-    if not last_field:
+def field_filled(state: dict, path: str) -> bool:
+    path = resolve_dynamic_path(state, path)
+    val = get_by_path(state, path)
+    if val is None:
         return False
+    if isinstance(val, str) and not val.strip():
+        return False
+    return True
 
-    buyer = state.setdefault("parties", {}).setdefault("buyer", {})
-    text = user_input.strip()
-    lower = text.lower()
+# --------------------------------------------------
+# ENUM NORMALIZATION
+# --------------------------------------------------
 
-    # ---- NAME ----
-    if last_field == "parties.buyer.name":
-        if len(text.split()) >= 2 and not any(x in lower for x in ["earn","salary","income","dependents"]):
-            if not buyer.get("name"):
-                buyer["name"] = text
-                logger.info(f"Deterministic extraction: name = {text}")
-                return True
+def normalize_enum(value: str, allowed: list[str]):
+    value = value.lower().strip()
 
-    # ---- DOB ----
-    elif last_field == "parties.buyer.dob":
-        m = re.search(r'\b(\d{1,2}/\d{1,2}/\d{2,4})\b', text)
-        if m:
-            dob = m.group(1)
-            if not buyer.get("dob"):
-                buyer["dob"] = dob
-                logger.info(f"Deterministic extraction: dob = {dob}")
-                return True
+    # remove punctuation
+    value = re.sub(r"[^a-z ]", "", value)
 
-    # ---- DEPENDENTS ----
-    elif last_field == "parties.buyer.dependents":
-        if lower in ["0","none","no","no dependents"]:
-            buyer["dependents"] = 0
-            logger.info("Deterministic extraction: dependents = 0")
-            return True
-        if text.isdigit():
-            buyer["dependents"] = int(text)
-            logger.info(f"Deterministic extraction: dependents = {text}")
-            return True
+    # exact match first
+    for v in allowed:
+        if value == v.replace("_", " "):
+            return v
 
-    # ---- INCOME ----
-    elif last_field == "income":
-        m = re.search(r'\d+', text.replace(',', ''))
-        if m:
-            income = int(m.group())
-            fi = state.setdefault("compliance", {}).setdefault("financial_inquiry", {})
-            fi["income_sources"] = [{
-                "type": "employment",
-                "amount": income,
-                "frequency": "annual",
-                "employment_status": "unknown",
-                "stability": "unknown",
-                "verified": False,
-                "verification_method": ""
-            }]
-            logger.info(f"Deterministic extraction: income = {income}")
-            return True
+    # fuzzy match (more tolerant)
+    matches = get_close_matches(
+        value,
+        [v.replace("_", " ") for v in allowed],
+        n=1,
+        cutoff=0.6   # was 0.75
+    )
 
-    # ---- EXPENSE FIELDS ----
-    elif last_field and last_field.startswith("expense:"):
-        expense_type = last_field.split(":")[1]
+    if matches:
+        matched = matches[0]
+        for v in allowed:
+            if matched == v.replace("_", " "):
+                return v
 
-        m = re.search(r'\d+', text.replace(',', ''))
-        if m:
-            amount = int(m.group())
+    return None
 
-            fi = state.setdefault("compliance", {}).setdefault("financial_inquiry", {})
-            expenses = fi.setdefault("living_expenses", {})
 
-            # only set if changed (prevents duplicate writes)
-            if expenses.get(expense_type) != amount:
-                expenses[expense_type] = amount
-                logger.info(f"Deterministic extraction: expense {expense_type} = {amount}")
+# --------------------------------------------------
+# DETERMINISTIC CAPTURE (minimal examples)
+# --------------------------------------------------
 
-            return True
+def deterministic_capture(state: dict, field_meta: dict, user_text: str) -> bool:
+    path = resolve_dynamic_path(state, field_meta["path"])
+    raw = user_text.strip()
+    text = raw.lower().replace(",", "").replace("$", "")
+
+    # INTEGER
+    if field_meta.get("type") == "integer" and text.isdigit():
+        set_by_path(state, path, int(text))
+        return True
+
+    # CURRENCY (2000, 2k, 2.5k, $2000)
+    # CURRENCY — only accept single number, reject ranges
+    if field_meta.get("type") == "currency":
+
+        # reject ranges like 70-80, 2 to 3, 5/6
+        if re.search(r"\d+\s*[-/to]+\s*\d+", text):
+            return False
+
+        # reject vague qualifiers
+        if any(w in text for w in ["about", "around", "rough", "approx", "maybe", "depends"]):
+            return False
+
+        m = re.fullmatch(r"\$?\s*(\d+(\.\d+)?)\s*k?", text)
+
+        if not m:
+            return False
+        
+        value = float(m.group(1))
+        if "k" in text:
+            value *= 1000
+        set_by_path(state, path, int(value))
+        return True
+
+
+    # ENUM
+    if field_meta.get("type") == "enum":
+        normalized = normalize_enum(text, field_meta.get("values", []))
+        if normalized:
+            set_by_path(state, path, normalized)
+            return True 
+
+    # STRING
+    if field_meta.get("type") == "string" and len(raw) > 0:
+        set_by_path(state, path, raw)
+        return True
+
+    # DATE
+    # DATE (DD/MM/YYYY or D/M/YYYY)
+    if field_meta.get("type") == "date":
+        m = re.fullmatch(r"(0?[1-9]|[12][0-9]|3[01])/(0?[1-9]|1[0-2])/\d{4}", text)
+        if not m:
+            return False
+
+        set_by_path(state, path, text)
+        return True
 
     return False
 
 
+# --------------------------------------------------
+# EXTRACTION AGENT (stub — wire LLM later)
+# --------------------------------------------------
 
-#---------------- MAIN LOOP ----------------
+def extraction_agent(state: dict, field_meta: dict, user_text: str):
 
-def main():
-    logger.info("Starting v5 Agentic Test Harness")
-    reset_state()
+    target_path = resolve_dynamic_path(state, field_meta["path"])
 
-    agent_instructions = load_text(AGENT_MD_PATH)
-    current_state = load_json(UPDATED_STATE_PATH)
+    system_prompt = f"""
+You are a regulated banking data extraction engine.
 
-    model = genai.GenerativeModel('models/gemini-2.0-flash')
+Target field:
+{target_path}
 
-    print("\n--- Credit Risk v5 Agent Session ---")
-    print("Agent: Buyer Intake Agent")
-    print("Type 'exit' to quit.\n")
+Return a JSON array with ONE object.
 
-    # ---------------- BOOTSTRAP FIRST QUESTION ----------------
-    runtime = current_state.setdefault("workflow_runtime", {})
-    runtime.setdefault("asked_fields", [])
+PRIORITY RULES:
 
-    first_field = resolve_next_field(current_state)
-    first_question = FIELD_QUESTION_MAP.get(first_field)
+1) If the user indicates existence of an additional item in a repeating section,
+   return add_object immediately — even if no value is given.
 
-    runtime["last_question_field"] = first_field
-    runtime["asked_fields"].append(first_field)
+2) Only if no structural intent exists, attempt value extraction.
 
-    save_json(UPDATED_STATE_PATH, current_state)
+3) Never return "none" when structural intent is present.
 
-    print(f"Agent: {first_question}")
+Operations:
+replace  → user gave one clear numeric value
+uncertain → user mentioned numbers but they are ambiguous
+none → user did not provide any number at all
+
+IMPORTANT RULE:
+If the message contains ANY numeric amount but it is not a single exact value,
+you MUST return "uncertain" — NEVER "none".
+
+Ambiguous examples:
+- 70-80k
+- about 5k
+- around 5000
+- 2 or 3 thousand
+- depends
+- maybe 4000
+
+Examples:
+
+"75000"
+→ [{{"operation":"replace","path":"{target_path}","value":75000}}]
+
+"roughly 70-80k"
+→ [{{"operation":"uncertain","reason":"range_detected"}}]
+
+"about 5000"
+→ [{{"operation":"uncertain","reason":"approximate"}}]
+
+"no income"
+→ [{{"operation":"none"}}]
+
+Return JSON only.
+
+STRUCTURAL INTENT (VERY IMPORTANT)
+
+When the user mentions:
+- another job
+- second job
+- additional income
+- more income sources
+- side job
+- freelance work alongside main job
+
+You MUST return:
+
+[{{"operation":"add_object","target_array":"compliance.financial_inquiry.income_sources"}}]
+
+Do NOT ask for amount yet.
+The system will handle questioning.
 
 
-    # ---------------- CONVERSATION LOOP ----------------
+"""
+# PASS ARRAY CONTEXT TO THE AGENT
+
+    array_parent = get_array_parent(target_path)
+
+    array_context = ""
+    if array_parent:
+        array_context = f"""
+CURRENT SECTION:
+This question belongs to a repeating collection:
+{array_parent}
+
+If the user mentions another item in this same category,
+you MUST create a new object using add_object.
+"""
+
+    system_prompt = array_context + system_prompt
+
+    prompt = f"""
+{system_prompt}
+
+{AGENT_INSTRUCTIONS}
+
+CURRENT STATE:
+{json.dumps(state, indent=2)}
+
+USER MESSAGE:
+{user_text}
+"""
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+            config={
+                "response_mime_type": "application/json"
+            }
+        )
+        
+        text = response.text
+
+        # extract first JSON array
+        start = text.find('[')
+        end = text.rfind(']')
+        if start == -1 or end == -1:
+            return []
+
+        patches = json.loads(text[start:end+1])
+
+        # ---------- SAFETY FILTER ----------
+        safe = []
+
+        for p in patches:
+            op = p.get("operation")
+
+            # allow structure creation
+            if op == "add_object":
+                safe.append(p)
+                continue
+
+            # normal field update
+            if p.get("path") == target_path:
+                safe.append(p)
+
+        return safe
+
+
+    except Exception:
+        return []
+
+# --------------------------------------------------
+# VALIDATION
+# --------------------------------------------------
+
+from datetime import datetime
+
+def validate_value(field_meta, value):
+
+    if value is None:
+        return False, "missing"
+
+    ftype = field_meta.get("type")
+
+    # ---------- DATE ----------
+    if ftype == "date":
+        try:
+            dt = datetime.strptime(value, "%d/%m/%Y")
+
+            # sanity bounds
+            if dt.year < 1900 or dt.year > datetime.now().year - 18:
+                return False, "invalid_age"
+
+        except Exception:
+            return False, "invalid_format"
+
+    # ---------- CURRENCY ----------
+    if ftype == "currency":
+        if not isinstance(value, (int, float)):
+            return False, "not_numeric"
+
+        if "min" in field_meta and value < field_meta["min"]:
+            return False, "too_small"
+
+        if "max" in field_meta and value > field_meta["max"]:
+            return False, "too_large"
+
+    return True, None
+
+
+
+# --------------------------------------------------
+# MAIN LOOP (FSM)
+# --------------------------------------------------
+
+def run():
+    # map array_path → list of field paths
+    need_prompt = True
+    state = load_state()
+    workflow = load_json(WORKFLOW_PATH)
+    meta_fields = flatten_fields(workflow)
+
+    section_map = {}
+    for stage in workflow.get("stages", []):
+        repeat = stage.get("section_repeat")
+        if repeat:
+            array_path = repeat["array_path"]
+            section_map[array_path] = [f["path"] for f in stage["fields"]]
+
+    print(f"--- {workflow.get('workflow_name','Loan Intake')} ---")
+
     while True:
-        user_input = input("You: ")
-        if user_input.lower() in ['exit', 'quit', 'q']:
+        field_meta = current_field(meta_fields, state)
+        if field_meta is None:
+            print("Application complete.")
             break
 
+        question = field_meta.get("question", field_meta.get("path"))
+        if need_prompt:
+            question = render_question(state, field_meta)
+            print(f"Agent: {question}")
 
-        # STEP 0 - forward capture (user volunteers info)
-        deterministic_pre_extract(current_state, user_input)
-        save_json(UPDATED_STATE_PATH, current_state)
+        user = input("You: ")
+        need_prompt = True
 
-        # STEP 1 — capture answer to LAST question
-        captured = deterministic_field_capture(current_state, user_input)
-        if captured:
-            save_json(UPDATED_STATE_PATH, current_state)
+        if user.lower() in ["exit", "quit"]:
+            break
 
-        # STEP 2 — determine what we need next
-        target_field = resolve_next_field(current_state)
+        last_field = state.get("workflow_runtime", {}).get("last_field")
 
-        # STEP 3 — call LLM only for complex extraction
-        patches = run_agent_turn(
-            model,
-            current_state,
-            user_input,
-            agent_instructions,
-            target_field
-        )
+        if last_field:
+            # if user answer matches enum of previous field
+            prev_meta = next((f for f in meta_fields if f["path"] == last_field), None)
+            if prev_meta and prev_meta.get("type") == "enum":
+                normalized = normalize_enum(user, prev_meta.get("values", []))
+                if normalized:
+                    set_by_path(state, last_field, normalized)
+                    print("Agent: Got it — updated previous answer.")
+                    # move pointer BACK to previous field so user sees correct flow
+                    state["workflow_runtime"]["active_index"] -= 1
+                    save_state(state)
+                    continue
 
-        # STEP 4 — apply patches
-        real_patches = [p for p in patches if p.get("operation") != "none"]
-        if real_patches:
-            apply_patches(current_state, real_patches)
-            save_json(UPDATED_STATE_PATH, current_state)
+        runtime = state.setdefault("workflow_runtime", {})
 
-        # STEP 5 — decide what to ask NEXT (safe conversational resolver)
+        if runtime.get("awaiting_repeat_for"):
+            answer = user.lower().strip()
 
-        while True:
+            # YES → create another object
+            if answer in ["yes", "y"]:
+                array_path = runtime["awaiting_repeat_for"]
 
-            next_field = resolve_next_field(current_state)
+                arr = get_by_path(state, array_path) or []
+                arr.append({})
+                set_by_path(state, array_path, arr)
 
-            if next_field == "done":
-                print("Agent: Application complete")
-                return
+                runtime.setdefault("array_index", {})[array_path] = len(arr) - 1
+                section_start = find_section_start(meta_fields, array_path)
+                set_active_index(state, section_start)
 
-            question = FIELD_QUESTION_MAP.get(next_field)
+                runtime.pop("awaiting_repeat_for")
+                runtime.pop("repeat_prompt")
+                save_state(state)
+                need_prompt = True
+                continue
 
-            runtime = current_state.setdefault("workflow_runtime", {})
-            runtime.setdefault("asked_fields", [])
+            # NO → move forward
+            elif answer in ["no", "n"]:
+                runtime.pop("awaiting_repeat_for")
+                runtime.pop("repeat_prompt")
+                advance_field(state)
+                save_state(state)
+                need_prompt = True
+                continue
 
-            # speak only if not asked before
-            if next_field not in runtime["asked_fields"]:
-                runtime["asked_fields"].append(next_field)
-                runtime["last_question_field"] = next_field
-                save_json(UPDATED_STATE_PATH, current_state)
-                print(f"Agent: {question}")
-                
-                # mark system prompts as completed
-                if next_field == "expense_primer":
-                    current_state.setdefault("workflow_flags", {})["expense_primer_shown"] = True
-                    save_json(UPDATED_STATE_PATH, current_state)
-
-                break   
-
-
-            # otherwise skip and find next askable field
-            runtime["last_question_field"] = next_field
+            # INVALID → ask again
+            else:
+                print(f"Agent: Please answer yes or no — {runtime['repeat_prompt']}")
+                need_prompt = False
+                continue
 
 
+        # STEP 1 — deterministic
+        captured = deterministic_capture(state, field_meta, user)
+
+        # STEP 2 — LLM extraction
+        if not captured:
+            patches = extraction_agent(state, field_meta, user)
+            handled = False
+
+            for p in patches:
+                op = p.get("operation")
+
+                if op == "uncertain":
+                    print(f"Agent: I want to be precise — {field_meta['question']}")
+                    handled = True
+                    break
+
+                if op == "replace":
+                    resolved_path = resolve_dynamic_path(state, field_meta["path"])
+                    set_by_path(state, resolved_path, p.get("value"))
+                    handled = True
+                    break
+
+                if op == "add_object":
+                    array_path = p.get("target_array")
+
+                    arr = get_by_path(state, array_path)
+                    if not isinstance(arr, list):
+                        arr = []
+                        set_by_path(state, array_path, arr)
+
+                    arr.append({})  # create empty structured object
+
+                    runtime = state.setdefault("workflow_runtime", {})
+                    runtime.setdefault("array_index", {})
+                    runtime["array_index"][array_path] = len(arr) - 1
+
+                    section_start = find_section_start(meta_fields, array_path)
+                    if section_start is not None:
+                        set_active_index(state, section_start)
+
+                    print("Agent: Got it — let's capture the additional details.")
+
+                    handled = True
+                    need_prompt = True
+                    break
+
+            if handled:
+                continue
+            runtime = state.setdefault("workflow_runtime", {})
+            retries = runtime.get("clarify_retries", 0)
+
+            if not handled:
+                if re.search(r"\d", user):
+                    if retries >= 2:
+                        print("Agent: Let's enter a precise number to continue.")
+                    else:
+                        print(f"Agent: I want to be precise — {field_meta['question']}")
+                    runtime["clarify_retries"] = retries + 1
+                    need_prompt = False
+                    continue
+
+            runtime["clarify_retries"] = 0
+
+
+
+        # STEP 3 — validate
+        if field_filled(state, field_meta["path"]):
+
+            resolved_path = resolve_dynamic_path(state, field_meta["path"])
+            value = get_by_path(state, resolved_path)
+            ok, reason = validate_value(field_meta, value)
+
+            if ok:
+                runtime = state.setdefault("workflow_runtime", {})
+                active_idx = get_active_index(state)
+
+                # check if field belongs to a repeating section
+                for array_path, fields in section_map.items():
+                    if field_meta["path"] in fields:
+                        if is_last_field_of_section(meta_fields, active_idx, fields):
+                            runtime["awaiting_repeat_for"] = array_path
+                            runtime["repeat_prompt"] = workflow_stage_repeat_prompt(workflow, array_path)
+                            save_state(state)
+                            print(f"Agent: {runtime['repeat_prompt']}")
+                            need_prompt = False
+                            continue
+
+                advance_field(state)
+                runtime["last_field"] = field_meta["path"]
+                save_state(state)
+                continue
+
+
+            # reject value
+            set_by_path(state, resolved_path, None)
+            print(f"Agent: That value seems unusual ({reason}). {field_meta['question']}")
+            need_prompt = False
+            continue
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    if "--new" in sys.argv:
+        if os.path.exists(STATE_PATH):
+            os.remove(STATE_PATH)
+        print("Starting a fresh application...\n")
+
+    run()
 

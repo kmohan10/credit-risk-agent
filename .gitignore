@@ -5,3 +5,19 @@ __pycache__/
 *.pyc
 *.log
 agents/tests/test_transaction_updated.json
+
+# -------------------------------
+# Credit Risk App Runtime Files
+# -------------------------------
+
+# Generated applications (live interview data)
+applications/
+
+# Active session pointer
+current_application.txt
+
+# Local env variants
+.env.local
+
+# Old experiments / backups
+v1 Stable Version/

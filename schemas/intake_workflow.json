@@ -1,0 +1,133 @@
+{
+    "workflow_name": "buyer_intake_v1",
+    "version": 1,
+    "stages": [
+        {
+            "id": "identity",
+            "fields": [
+                {
+                    "id": "buyer_name",
+                    "path": "parties.buyer.name",
+                    "question": "What is your full legal name?",
+                    "type": "string",
+                    "required": true
+                },
+                {
+                    "id": "buyer_dob",
+                    "path": "parties.buyer.dob",
+                    "question": "What is your date of birth (DD/MM/YYYY)?",
+                    "type": "date",
+                    "required": true
+                },
+                {
+                    "id": "dependents",
+                    "path": "parties.buyer.dependents",
+                    "question": "How many dependents do you have?",
+                    "type": "integer",
+                    "required": true
+                }
+            ]
+        },
+        {
+            "id": "income",
+            "section_repeat": {
+                "array_path": "compliance.financial_inquiry.income_sources",
+                "repeat_prompt": "Do you have another income source?"
+            },
+            "fields": [
+                {
+                    "id": "annual_income",
+                    "path": "compliance.financial_inquiry.income_sources[0].amount",
+                    "question": "What is your annual income before tax?",
+                    "type": "currency",
+                    "required": true,
+                    "min": 0,
+                    "max": 100000000,
+                    "clarify_if_uncertain": true
+                },
+                {
+                    "id": "employment_type",
+                    "path": "compliance.financial_inquiry.income_sources[0].employment_type",
+                    "question": "Are you salaried or self-employed?",
+                    "type": "enum",
+                    "values": [
+                        "salaried",
+                        "self_employed"
+                    ],
+                    "required": true
+                },
+                {
+                    "id": "employment_detail",
+                    "path": "compliance.financial_inquiry.income_sources[0].employer_name",
+                    "question": "Who is your employer or what business do you run?",
+                    "type": "string",
+                    "required": true
+                }
+            ]
+        },
+        {
+            "id": "expenses",
+            "fields": [
+                {
+                    "id": "housing",
+                    "path": "compliance.financial_inquiry.living_expenses.housing",
+                    "question": "Monthly housing cost?",
+                    "type": "currency",
+                    "required": true,
+                    "min": 0,
+                    "max": 200000,
+                    "clarify_if_uncertain": true
+                },
+                {
+                    "id": "food",
+                    "path": "compliance.financial_inquiry.living_expenses.food",
+                    "question": "Monthly food expense?",
+                    "type": "currency",
+                    "required": true
+                },
+                {
+                    "id": "transport",
+                    "path": "compliance.financial_inquiry.living_expenses.transport",
+                    "question": "Monthly transport expense?",
+                    "type": "currency",
+                    "required": true
+                },
+                {
+                    "id": "utilities",
+                    "path": "compliance.financial_inquiry.living_expenses.utilities",
+                    "question": "Monthly utilities expense?",
+                    "type": "currency",
+                    "required": true
+                },
+                {
+                    "id": "insurance",
+                    "path": "compliance.financial_inquiry.living_expenses.insurance",
+                    "question": "Monthly insurance expense?",
+                    "type": "currency",
+                    "required": true
+                },
+                {
+                    "id": "medical",
+                    "path": "compliance.financial_inquiry.living_expenses.medical",
+                    "question": "Monthly medical expense?",
+                    "type": "currency",
+                    "required": true
+                },
+                {
+                    "id": "subscriptions",
+                    "path": "compliance.financial_inquiry.living_expenses.subscriptions",
+                    "question": "Monthly subscriptions expense?",
+                    "type": "currency",
+                    "required": true
+                },
+                {
+                    "id": "discretionary",
+                    "path": "compliance.financial_inquiry.living_expenses.discretionary",
+                    "question": "Monthly discretionary spending?",
+                    "type": "currency",
+                    "required": true
+                }
+            ]
+        }
+    ]
+}
